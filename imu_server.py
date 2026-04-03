@@ -144,13 +144,13 @@ def clear():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     init_csv()
-    print(f"\n{'='*50}")
-    print(f"  IMU Server starting on http://{HOST}:{PORT}")
-    print(f"  POST endpoint : http://<your-ip>:{PORT}/imu")
-    print(f"  View data     : http://localhost:{PORT}/data?n=50")
-    print(f"  Health check  : http://localhost:{PORT}/status")
-    print(f"  CSV output    : {os.path.abspath(CSV_FILE)}")
-    print(f"{'='*50}\n")
     import os
     port = int(os.environ.get("PORT", 5000))
+    print(f"\n{'='*50}")
+    print(f"  IMU Server starting on http://0.0.0.0:{port}")
+    print(f"  POST endpoint : http://<your-ip>:{port}/imu")
+    print(f"  View data     : http://localhost:{port}/data?n=50")
+    print(f"  Health check  : http://localhost:{port}/status")
+    print(f"  CSV output    : {os.path.abspath(CSV_FILE)}")
+    print(f"{'='*50}\n")
     app.run(host="0.0.0.0", port=port, debug=False)
