@@ -320,6 +320,13 @@ def index():
     return '<meta http-equiv="refresh" content="0;url=/dashboard">'
 
 
+from flask import send_file
+
+@app.route("/download/db")
+def download_db():
+    """Download the SQLite database file."""
+    return send_file(DB_FILE, as_attachment=True, download_name="imu_data.db")
+
 # ─────────────────────────────────────────────
 #  Entry Point
 # ─────────────────────────────────────────────
