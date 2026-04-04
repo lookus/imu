@@ -1,18 +1,15 @@
 """
-MPU-9250 IMU Data Receiver — Flask Server
-==========================================
-Receives HTTP POST JSON from ESP32 at /imu
-Stores data in-memory and logs to CSV file.
+MPU-9250 Dual IMU Data Receiver — Flask Server
+================================================
+Receives HTTP POST JSON from two ESP32 nodes at /imu
+Each sensor is identified by sensor_id in the payload.
+Saves separate CSV files per sensor + combined CSV.
 
-Install dependencies:
+Install:
     pip install flask
 
 Run:
     python imu_server.py
-
-The server listens on 0.0.0.0:5000 — make sure your PC firewall
-allows inbound TCP on port 5000, and that the ESP32 and this PC
-are on the same WiFi network.
 """
 
 from flask import Flask, request, jsonify
@@ -25,40 +22,47 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 #  Configuration
 # ─────────────────────────────────────────────
-HOST        = "0.0.0.0"   # Accept connections from any device on the network
-PORT        = 5000
-CSV_FILE    = "imu_data.csv"
-MAX_RECORDS = 10000        # Max records kept in memory
+HOST            = "0.0.0.0"
+COMBINED_CSV    = "imu_data_all.csv"
+MAX_RECORDS     = 10000
 
 # ─────────────────────────────────────────────
-#  In-memory store (for live monitoring via /data)
-# ─────────────────────────────────────────────
-records = []
-
-# ─────────────────────────────────────────────
-#  CSV Setup — write header if file is new
+#  CSV Headers
 # ─────────────────────────────────────────────
 CSV_HEADERS = [
-    "server_time", "device_timestamp_ms",
+    "server_time", "sensor_id", "label", "device_timestamp_ms",
     "accel_x", "accel_y", "accel_z",
     "gyro_x",  "gyro_y",  "gyro_z",
     "mag_x",   "mag_y",   "mag_z",
     "temp_c"
 ]
 
-def init_csv():
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, "w", newline="") as f:
+# ─────────────────────────────────────────────
+#  In-memory store — per sensor + combined
+# ─────────────────────────────────────────────
+records = {
+    "all": []
+}
+
+# ─────────────────────────────────────────────
+#  CSV Helpers
+# ─────────────────────────────────────────────
+def init_csv(filepath):
+    if not os.path.exists(filepath):
+        with open(filepath, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
             writer.writeheader()
-        print(f"[CSV] Created {CSV_FILE}")
+        print(f"[CSV] Created {filepath}")
     else:
-        print(f"[CSV] Appending to existing {CSV_FILE}")
+        print(f"[CSV] Appending to existing {filepath}")
 
-def append_csv(row: dict):
-    with open(CSV_FILE, "a", newline="") as f:
+def append_csv(filepath, row):
+    with open(filepath, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
         writer.writerow(row)
+
+def get_sensor_csv(sensor_id):
+    return f"imu_data_{sensor_id}.csv"
 
 # ─────────────────────────────────────────────
 #  Routes
@@ -66,7 +70,7 @@ def append_csv(row: dict):
 
 @app.route("/imu", methods=["POST"])
 def receive_imu():
-    """Main endpoint — receives JSON from ESP32."""
+    """Main endpoint — receives JSON from any ESP32 sensor."""
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 415
 
@@ -74,13 +78,16 @@ def receive_imu():
     if data is None:
         return jsonify({"error": "Invalid JSON body"}), 400
 
-    # Parse fields (gracefully handle missing optional fields)
-    accel = data.get("accel", {})
-    gyro  = data.get("gyro",  {})
-    mag   = data.get("mag",   {})
+    sensor_id = data.get("sensor_id", "unknown")
+    label     = data.get("label", "")
+    accel     = data.get("accel", {})
+    gyro      = data.get("gyro",  {})
+    mag       = data.get("mag",   {})
 
     row = {
         "server_time":          datetime.now().isoformat(timespec="milliseconds"),
+        "sensor_id":            sensor_id,
+        "label":                label,
         "device_timestamp_ms":  data.get("timestamp", ""),
         "accel_x":              accel.get("x", ""),
         "accel_y":              accel.get("y", ""),
@@ -94,63 +101,98 @@ def receive_imu():
         "temp_c":               data.get("temp", ""),
     }
 
-    # Save to CSV
-    append_csv(row)
+    # Save to per-sensor CSV
+    sensor_csv = get_sensor_csv(sensor_id)
+    if not os.path.exists(sensor_csv):
+        init_csv(sensor_csv)
+    append_csv(sensor_csv, row)
 
-    # Keep in memory (circular buffer)
-    records.append(row)
-    if len(records) > MAX_RECORDS:
-        records.pop(0)
+    # Save to combined CSV
+    append_csv(COMBINED_CSV, row)
+
+    # Store in memory — per sensor bucket + combined
+    if sensor_id not in records:
+        records[sensor_id] = []
+    records[sensor_id].append(row)
+    records["all"].append(row)
+
+    # Trim memory buffers
+    for key in records:
+        if len(records[key]) > MAX_RECORDS:
+            records[key].pop(0)
 
     # Console log
+    temp_str = f"  Temp: {row['temp_c']:.1f}C" if row['temp_c'] != "" else ""
     print(
-        f"[{row['server_time']}]  "
+        f"[{row['server_time']}] [{sensor_id}/{label}]  "
         f"Accel({row['accel_x']:.3f}, {row['accel_y']:.3f}, {row['accel_z']:.3f})  "
         f"Gyro({row['gyro_x']:.3f}, {row['gyro_y']:.3f}, {row['gyro_z']:.3f})"
-        + (f"  Temp: {row['temp_c']:.1f}°C" if row['temp_c'] != "" else ""),
+        f"{temp_str}",
         flush=True
     )
 
-    return jsonify({"status": "ok", "records_stored": len(records)}), 200
+    return jsonify({
+        "status": "ok",
+        "sensor_id": sensor_id,
+        "records_stored": len(records.get(sensor_id, []))
+    }), 200
 
 
 @app.route("/data", methods=["GET"])
 def get_data():
-    """Returns the last N records as JSON. Usage: GET /data?n=100"""
-    n = min(int(request.args.get("n", 50)), MAX_RECORDS)
-    return jsonify(records[-n:]), 200
+    """Returns last N records from all sensors or a specific sensor.
+    Usage: GET /data?n=100
+           GET /data?n=100&sensor=sensor_1
+    """
+    n          = min(int(request.args.get("n", 50)), MAX_RECORDS)
+    sensor_key = request.args.get("sensor", "all")
+
+    if sensor_key not in records:
+        return jsonify({"error": f"Unknown sensor: {sensor_key}. Available: {list(records.keys())}"}), 404
+
+    return jsonify(records[sensor_key][-n:]), 200
 
 
 @app.route("/status", methods=["GET"])
 def status():
-    """Health check endpoint."""
+    """Health check — shows record counts per sensor."""
+    sensor_counts = {k: len(v) for k, v in records.items()}
     return jsonify({
         "status":        "running",
-        "records_in_memory": len(records),
-        "csv_file":      CSV_FILE,
+        "sensors_seen":  [k for k in records.keys() if k != "all"],
+        "record_counts": sensor_counts,
+        "combined_csv":  COMBINED_CSV,
         "server_time":   datetime.now().isoformat()
     }), 200
 
 
 @app.route("/clear", methods=["POST"])
 def clear():
-    """Clears the in-memory buffer (CSV is preserved)."""
-    records.clear()
-    return jsonify({"status": "cleared"}), 200
+    """Clears in-memory buffer for all or a specific sensor."""
+    sensor_key = request.args.get("sensor", None)
+    if sensor_key:
+        if sensor_key in records:
+            records[sensor_key].clear()
+            return jsonify({"status": f"cleared {sensor_key}"}), 200
+        return jsonify({"error": "sensor not found"}), 404
+    for key in records:
+        records[key].clear()
+    return jsonify({"status": "all cleared"}), 200
 
 
 # ─────────────────────────────────────────────
 #  Entry Point
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    init_csv()
-    import os
+    init_csv(COMBINED_CSV)
     port = int(os.environ.get("PORT", 5000))
-    print(f"\n{'='*50}")
-    print(f"  IMU Server starting on http://0.0.0.0:{port}")
-    print(f"  POST endpoint : http://<your-ip>:{port}/imu")
-    print(f"  View data     : http://localhost:{port}/data?n=50")
-    print(f"  Health check  : http://localhost:{port}/status")
-    print(f"  CSV output    : {os.path.abspath(CSV_FILE)}")
-    print(f"{'='*50}\n")
+    print(f"\n{'='*55}")
+    print(f"  Dual IMU Server starting on http://0.0.0.0:{port}")
+    print(f"  POST endpoint  : http://<your-ip>:{port}/imu")
+    print(f"  All data       : http://localhost:{port}/data?n=50")
+    print(f"  Sensor 1 data  : http://localhost:{port}/data?n=50&sensor=sensor_1")
+    print(f"  Sensor 2 data  : http://localhost:{port}/data?n=50&sensor=sensor_2")
+    print(f"  Health check   : http://localhost:{port}/status")
+    print(f"  Combined CSV   : {os.path.abspath(COMBINED_CSV)}")
+    print(f"{'='*55}\n")
     app.run(host="0.0.0.0", port=port, debug=False)
